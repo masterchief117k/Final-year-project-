@@ -1,0 +1,68 @@
+Intelligent Video Surveillance System (MVP) - Project Approach
+-------------------------------------------------------------
+
+1. Overview
+-----------
+We are building a minimal viable product (MVP) for an intelligent video surveillance system.
+The system will run on a laptop using its webcam for live footage and a web application
+for user interaction. Core features include:
+- Secure login
+- Real-time alerts (new face detected, weapon detection)
+- Automated attendance logging
+
+2. Tech Stack (Minimal Version)
+-------------------------------
+Frontend:
+- HTML, CSS, JavaScript
+- Bootstrap for quick styling
+- Basic JS pop-ups for alerts
+- Video feed embedded via <video> tag or MJPEG stream
+
+Backend:
+- Flask (Python) as the web server
+- REST API endpoints for login, attendance, alerts
+- Flask-SocketIO for real-time alert push
+
+Computer Vision / ML:
+- OpenCV for webcam capture and preprocessing
+- Face recognition using pretrained models (Dlib / FaceNet)
+- Weapon detection using YOLOv5-small or SSD MobileNet
+- Inference runs locally on laptop CPU/GPU
+
+Database:
+- SQLite (lightweight, file-based)
+- Stores user credentials (hashed), face embeddings, attendance logs, alert logs
+
+Authentication:
+- Flask-Login or simple session management
+- Password hashing with bcrypt
+- Basic role separation (admin vs reviewer)
+
+Deployment:
+- Local deployment on laptop (backend + frontend served by Flask)
+- No Docker/Cloud required for MVP
+- Single process handles webcam, inference, and web app
+
+3. Workflow
+-----------
+1. User logs into web app (login page).
+2. Dashboard displays live webcam feed.
+3. Backend runs detection pipeline:
+   - Face recognition → attendance marked if known.
+   - Weapon detection → alert triggered if confidence > threshold.
+4. Alerts pushed to frontend via WebSocket → pop-up notification.
+5. Logs stored in SQLite for later review.
+
+4. Next Steps
+-------------
+- Define folder structure (app.py, static/, templates/, models/, database.db).
+- Implement login and dashboard pages.
+- Integrate OpenCV with Flask for webcam feed.
+- Connect detection pipeline to alert manager.
+- Test attendance logging and alert notifications.
+- Prepare demo-ready MVP for collaborators to review.
+
+-------------------------------------------------------------
+This document outlines the minimal approach for the MVP.
+Collaborators can suggest improvements, add features, or propose
+a production-ready stack once the MVP is stable.
