@@ -535,3 +535,184 @@ body.dashboard-body {
   border: 1px solid rgba(255, 59, 48, 0.4) !important;
   color: #fff !important;
 }
+
+/* ========== EMPLOYEE MANAGEMENT ========== */
+.emp-list-container {
+  padding: 16px;
+  min-height: 80px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.emp-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.emp-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(0, 240, 255, 0.05);
+  border: 1px solid rgba(0, 240, 255, 0.12);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text-primary);
+  transition: background 0.2s, border-color 0.2s;
+  flex: 0 0 auto;
+}
+
+.emp-card:hover {
+  background: rgba(0, 240, 255, 0.1);
+  border-color: rgba(0, 240, 255, 0.3);
+}
+
+.emp-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(0, 240, 255, 0.15);
+  border: 1px solid rgba(0, 240, 255, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Orbitron', sans-serif;
+  font-size: 13px;
+  color: var(--accent-cyan);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.emp-card-info .emp-name {
+  font-weight: 600;
+  color: #fff;
+  font-size: 13px;
+}
+
+.emp-card-info .emp-id-tag {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--accent-cyan);
+  opacity: 0.7;
+}
+
+/* Buttons */
+.emp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: 'Inter', sans-serif;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.emp-btn-add {
+  background: rgba(0, 240, 255, 0.12);
+  border: 1px solid rgba(0, 240, 255, 0.3);
+  color: var(--accent-cyan);
+}
+
+.emp-btn-add:hover {
+  background: rgba(0, 240, 255, 0.22);
+  box-shadow: 0 0 14px rgba(0, 240, 255, 0.15);
+}
+
+.emp-btn-remove {
+  background: rgba(255, 59, 48, 0.1);
+  border: 1px solid rgba(255, 59, 48, 0.3);
+  color: #ff3b30;
+}
+
+.emp-btn-remove:hover {
+  background: rgba(255, 59, 48, 0.2);
+  box-shadow: 0 0 14px rgba(255, 59, 48, 0.15);
+}
+
+/* Modals */
+.emp-modal-content {
+  background: #0f1729;
+  border: 1px solid rgba(0, 240, 255, 0.15);
+  border-radius: 16px;
+  color: #fff;
+  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.7);
+}
+
+.emp-modal-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  padding: 20px 24px;
+  background: rgba(0, 240, 255, 0.03);
+}
+
+.emp-modal-header .modal-title {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 15px;
+  letter-spacing: 1px;
+  color: #fff;
+  display: flex;
+  align-items: center;
+}
+
+.emp-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.emp-input {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  padding: 12px 16px;
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  font-family: 'Inter', sans-serif;
+}
+
+.emp-input:focus {
+  border-color: rgba(0, 240, 255, 0.4);
+  box-shadow: 0 0 0 3px rgba(0, 240, 255, 0.08);
+}
+
+.emp-input::placeholder {
+  color: rgba(142, 155, 176, 0.5);
+}
+
+.emp-photo-drop {
+  background: rgba(0, 240, 255, 0.03);
+  border: 1.5px dashed rgba(0, 240, 255, 0.25);
+  border-radius: 10px;
+  padding: 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.emp-photo-drop:hover {
+  background: rgba(0, 240, 255, 0.07);
+  border-color: rgba(0, 240, 255, 0.5);
+}
+
+.emp-error {
+  background: rgba(255, 59, 48, 0.1);
+  border: 1px solid rgba(255, 59, 48, 0.3);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #ff6b6b;
+  margin-bottom: 14px;
+}

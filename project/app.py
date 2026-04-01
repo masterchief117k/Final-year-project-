@@ -3,7 +3,7 @@ import cv2
 import time
 import numpy as np
 import torch
-from flask import Flask, render_template, request, redirect, url_for, Response, session
+from flask import Flask, render_template, request, redirect, url_for, Response, session, jsonify
 from flask_socketio import SocketIO, emit
 import sqlite3
 from flask_bcrypt import Bcrypt
@@ -25,6 +25,9 @@ def init_db():
                  (id INTEGER PRIMARY KEY, name TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS alerts
                  (id INTEGER PRIMARY KEY, type TEXT, message TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS employees
+                 (id INTEGER PRIMARY KEY, name TEXT, emp_id TEXT UNIQUE, image_path TEXT,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     
     c.execute("SELECT * FROM users WHERE username='admin'")
     if not c.fetchone():
@@ -88,15 +91,41 @@ def load_known_faces():
     if not os.path.exists(employees_dir):
         os.makedirs(employees_dir)
         return
-        
+
+    # Build a map of normalized image_path -> employee name from DB
+    name_map = {}
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT name, image_path FROM employees")
+        for row in c.fetchall():
+            name_map[os.path.normpath(row[1])] = row[0]
+        conn.close()
+    except Exception as e:
+        print(f"[WARNING] Could not read employees from DB: {e}")
+
+    print(f"[INFO] DB name_map has {len(name_map)} entries: {list(name_map.keys())}")
+
     for filename in os.listdir(employees_dir):
-        name = os.path.splitext(filename)[0]
-        filepath = os.path.join(employees_dir, filename)
-        
+        filepath = os.path.normpath(os.path.join(employees_dir, filename))
+
+        # Look up the proper name from DB; fallback to cleaned filename
+        if filepath in name_map:
+            name = name_map[filepath]
+        else:
+            # Fallback: strip emp_id prefix (format: EMPID_Name.jpg)
+            raw = os.path.splitext(filename)[0]
+            parts = raw.split('_', 1)
+            name = parts[1].replace('_', ' ') if len(parts) > 1 else raw.replace('_', ' ')
+            print(f"[WARNING] '{filepath}' not found in DB name_map, using fallback name: '{name}'")
+
         img = cv2.imread(filepath)
-        if img is None: continue
+        if img is None:
+            print(f"[WARNING] Could not read image: {filepath}")
+            continue
         
         (h, w) = img.shape[:2]
+        print(f"[INFO]   Processing '{filename}' ({w}x{h}) for face: '{name}'")
         blob = cv2.dnn.blobFromImage(img, 1.0, (300, 300), (104.0, 177.0, 123.0))
         face_net.setInput(blob)
         detections = face_net.forward()
@@ -105,7 +134,7 @@ def load_known_faces():
         best_box = None
         for i in range(0, detections.shape[2]):
             confidence = detections[0, 0, i, 2]
-            if confidence > 0.5 and confidence > max_confidence:
+            if confidence > 0.3 and confidence > max_confidence:
                 max_confidence = confidence
                 best_box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
                 
@@ -120,8 +149,11 @@ def load_known_faces():
                 embedder_net.setInput(face_blob)
                 vec = embedder_net.forward()
                 
-                known_face_names.append(name.replace('_', ' '))
+                known_face_names.append(name)
                 known_face_embeddings.append(vec.flatten())
+                print(f"[INFO]   ✓ Loaded face: '{name}' (detection confidence: {max_confidence:.2f})")
+        else:
+            print(f"[WARNING] ✗ NO FACE detected in '{filename}' — this employee will NOT be recognized!")
 
 if face_net and embedder_net:
     print("[INFO] Loading employee faces...")
@@ -189,6 +221,37 @@ def logout():
     session.pop('user', None)
     return redirect(url_for('login'))
 
+@app.route('/api/logs')
+def api_logs():
+    if 'user' not in session:
+        return {'logs': []}, 401
+    
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT type, message, timestamp FROM alerts ORDER BY id DESC LIMIT 50")
+    alerts = c.fetchall()
+    
+    c.execute("SELECT name, timestamp FROM attendance ORDER BY id DESC LIMIT 50")
+    attendance = c.fetchall()
+    conn.close()
+    
+    logs = []
+    for a in alerts:
+        logs.append({
+            'type': a[0],
+            'message': a[1],
+            'timestamp': a[2]
+        })
+    for a in attendance:
+        logs.append({
+            'type': 'success',
+            'message': f'Attendance logged for {a[0]}',
+            'timestamp': a[1]
+        })
+        
+    logs.sort(key=lambda x: x['timestamp'], reverse=True)
+    return {'logs': logs[:50]}
+
 # =============================================
 #  HELPER: Log alert to DB
 # =============================================
@@ -203,6 +266,109 @@ def log_alert_to_db(alert_type, message):
         print(f"[DB ERROR] {e}")
 
 # =============================================
+
+@app.route('/api/employees', methods=['GET'])
+def api_list_employees():
+    if 'user' not in session:
+        return jsonify({'employees': []}), 401
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT name, emp_id, created_at FROM employees ORDER BY created_at DESC")
+    rows = c.fetchall()
+    conn.close()
+    return jsonify({'employees': [{'name': r[0], 'emp_id': r[1], 'created_at': r[2]} for r in rows]})
+
+@app.route('/api/employee', methods=['POST'])
+def api_add_employee():
+    if 'user' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+    name = request.form.get('name', '').strip()
+    emp_id = request.form.get('emp_id', '').strip()
+    photo = request.files.get('photo')
+    if not name or not emp_id or not photo:
+        return jsonify({'error': 'Name, Employee ID, and photo are required.'}), 400
+
+    employees_dir = os.path.join('static', 'employees')
+    os.makedirs(employees_dir, exist_ok=True)
+    safe_name = name.replace(' ', '_')
+    filename = f"{emp_id}_{safe_name}.jpg"
+    filepath = os.path.normpath(os.path.join(employees_dir, filename))
+
+    # Read uploaded file through OpenCV and re-encode as proper JPEG
+    import tempfile
+    tmp_path = os.path.join(employees_dir, f"_tmp_{filename}")
+    photo.save(tmp_path)
+    img = cv2.imread(tmp_path)
+    if img is None:
+        os.remove(tmp_path)
+        return jsonify({'error': 'Could not read the uploaded image. Please upload a JPG or PNG photo.'}), 400
+    cv2.imwrite(filepath, img)
+    if os.path.exists(tmp_path) and os.path.normpath(tmp_path) != os.path.normpath(filepath):
+        os.remove(tmp_path)
+
+    # Validate that a face is detectable in the uploaded photo
+    if face_net:
+        (h, w) = img.shape[:2]
+        blob = cv2.dnn.blobFromImage(img, 1.0, (300, 300), (104.0, 177.0, 123.0))
+        face_net.setInput(blob)
+        detections = face_net.forward()
+        face_found = False
+        for i in range(0, detections.shape[2]):
+            if detections[0, 0, i, 2] > 0.3:
+                face_found = True
+                break
+        if not face_found:
+            os.remove(filepath)
+            return jsonify({'error': 'No face detected in the uploaded photo. Please upload a clear, front-facing photo with good lighting.'}), 400
+        print(f"[INFO] Face validated in uploaded photo for '{name}'.")
+
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("INSERT INTO employees (name, emp_id, image_path) VALUES (?, ?, ?)",
+                  (name, emp_id, filepath))
+        conn.commit()
+        conn.close()
+    except sqlite3.IntegrityError:
+        os.remove(filepath)
+        return jsonify({'error': f'Employee ID "{emp_id}" already exists.'}), 409
+
+    if face_net and embedder_net:
+        load_known_faces()
+        print(f"[INFO] Employee '{name}' added. {len(known_face_names)} face(s) now loaded.")
+
+    return jsonify({'success': True, 'name': name, 'emp_id': emp_id})
+
+@app.route('/api/employee', methods=['DELETE'])
+def api_remove_employee():
+    if 'user' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+    data = request.get_json()
+    emp_id = (data.get('emp_id') or '').strip()
+    if not emp_id:
+        return jsonify({'error': 'Employee ID is required.'}), 400
+
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT name, image_path FROM employees WHERE emp_id=?", (emp_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Employee not found.'}), 404
+
+    emp_name, image_path = row[0], row[1]
+    c.execute("DELETE FROM employees WHERE emp_id=?", (emp_id,))
+    conn.commit()
+    conn.close()
+
+    if image_path and os.path.exists(image_path):
+        os.remove(image_path)
+
+    if face_net and embedder_net:
+        load_known_faces()
+        print(f"[INFO] Employee '{emp_name}' removed. Faces reloaded.")
+
+    return jsonify({'success': True, 'name': emp_name})
 
 # =============================================
 #  VIDEO PROCESSING PIPELINE
@@ -294,7 +460,11 @@ def generate_frames():
                                 min_dist = dist
                                 best_match = known_face_names[j]
                                 
-                        if min_dist < 0.7 and best_match is not None:
+                        # Debug: print distance every 30 frames
+                        if frame_counter % 30 == 0 and best_match is not None:
+                            print(f"[FACE] Closest match: '{best_match}' dist={min_dist:.3f} (threshold=1.0)")
+                        
+                        if min_dist < 1.0 and best_match is not None:
                             name = best_match
                             color = (0, 255, 0)  # Green for known
                     
