@@ -54,7 +54,7 @@ else:
     print("[WARNING] Face detection models not found in models/ directory!")
 
 # --- 2. Face Embedding Model (OpenFace) ---
-embedder_path = os.path.join("models", "openface_nn4.small2.v1.t7")
+embedder_path = os.path.join("models", "nn4.small2.v1.t7")
 if os.path.exists(embedder_path):
     embedder_net = cv2.dnn.readNetFromTorch(embedder_path)
     print("[INFO] Face embedding model loaded.")

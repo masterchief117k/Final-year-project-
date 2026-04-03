@@ -1,0 +1,26 @@
+============================================================
+  FACE RECOGNITION DIAGNOSTIC
+============================================================
+
+[1] Model files:
+  Embedder exists: True, size: 31510785 bytes
+  Face detector exists: True
+
+[2] Embedder loaded: SUCCESS
+[3] Face detector loaded: SUCCESS
+
+[4] Employee images in 'static\employees': 1 file(s)
+  1_kshitij.jpg (160590 bytes, 1280x720)
+    Best face confidence: 0.8890
+    Face ROI: (304, 259, 3)
+    Embedding OK! norm=1.0000, first3=[0.06009125 0.23113944 0.00552129]
+
+[5] Database:
+  Employees in DB: 1
+    name='kshitij', id='1', path='static\employees\1_kshitij.jpg', norm='static\employees\1_kshitij.jpg', exists=True
+
+[6] Path matching test:
+  name_map keys: ['static\\employees\\1_kshitij.jpg']
+  File 'static\employees\1_kshitij.jpg' -> DB match: True
+
+============================================================
