@@ -98,7 +98,7 @@ source venv/bin/activate
 
 **3. Install the required tools:**
 ```bash
-pip install flask flask-socketio flask-bcrypt opencv-python numpy torch ultralytics
+pip install -r requirements.txt
 ```
 
 **4. Start the Application:**
@@ -108,3 +108,15 @@ python app.py
 
 **5. View the System:**
 Open Google Chrome (or any browser) and type `http://localhost:5000` into the search bar. Log in using the default admin credentials provided by the team!
+
+---
+
+## How to Test Performance (Benchmarking)
+
+To evaluate the system's performance metrics (Latency, Precision, Recall) exactly as formatted for academic research papers, run the standalone benchmark script:
+
+```bash
+python project/benchmark_ivss.py
+```
+
+This will run simulated 30 FPS and 12 FPS test pipelines and output a LaTeX-ready table summarizing the component latency (Face Detection, OpenFace Embedding, YOLOv5s Weapon Detection, Tampering Heuristic).

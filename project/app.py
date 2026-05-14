@@ -3,10 +3,17 @@ import cv2
 import time
 import numpy as np
 import torch
+import threading
+import queue
+from collections import deque
 from flask import Flask, render_template, request, redirect, url_for, Response, session, jsonify
 from flask_socketio import SocketIO, emit
 import sqlite3
 from flask_bcrypt import Bcrypt
+import warnings
+
+# Suppress PyTorch deprecation warnings from YOLOv5
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 app = Flask(__name__)
 app.secret_key = "ivss_super_secret"
@@ -14,7 +21,8 @@ socketio = SocketIO(app)
 bcrypt = Bcrypt(app)
 
 # --- Database Setup ---
-DB_NAME = "database.db"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_NAME = os.path.join(SCRIPT_DIR, "database.db")
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -44,8 +52,8 @@ init_db()
 # =============================================
 
 # --- 1. Face Detection Model (SSD ResNet) ---
-model_path = os.path.join("models", "res10_300x300_ssd_iter_140000.caffemodel")
-config_path = os.path.join("models", "deploy.prototxt")
+model_path = os.path.join(SCRIPT_DIR, "models", "res10_300x300_ssd_iter_140000.caffemodel")
+config_path = os.path.join(SCRIPT_DIR, "models", "deploy.prototxt")
 if os.path.exists(model_path) and os.path.exists(config_path):
     face_net = cv2.dnn.readNetFromCaffe(config_path, model_path)
     print("[INFO] Face detection model loaded.")
@@ -54,7 +62,7 @@ else:
     print("[WARNING] Face detection models not found in models/ directory!")
 
 # --- 2. Face Embedding Model (OpenFace) ---
-embedder_path = os.path.join("models", "nn4.small2.v1.t7")
+embedder_path = os.path.join(SCRIPT_DIR, "models", "nn4.small2.v1.t7")
 if os.path.exists(embedder_path):
     embedder_net = cv2.dnn.readNetFromTorch(embedder_path)
     print("[INFO] Face embedding model loaded.")
@@ -87,7 +95,7 @@ def load_known_faces():
     known_face_names.clear()
     known_face_embeddings.clear()
     
-    employees_dir = os.path.join("static", "employees")
+    employees_dir = os.path.join(SCRIPT_DIR, "static", "employees")
     if not os.path.exists(employees_dir):
         os.makedirs(employees_dir)
         return
@@ -160,29 +168,245 @@ if face_net and embedder_net:
     load_known_faces()
     print(f"[INFO] Loaded {len(known_face_names)} employee(s).")
 
-# --- Webcam Setup ---
-camera = cv2.VideoCapture(0)
+# --- Webcam Setup (replaced by threaded FrameBuffer) ---
+# camera = cv2.VideoCapture(0)  # OLD: inline capture
 
 # =============================================
-#  STATE VARIABLES
+#  THREADED ARCHITECTURE — LIFO FRAME BUFFER
 # =============================================
+
+class FrameBuffer:
+    """Asynchronous LIFO-1 frame buffer. Daemon thread captures frames;
+    consumers always get the freshest frame, preventing buffer bloat."""
+
+    def __init__(self, src=0):
+        self._cap = cv2.VideoCapture(src)
+        self._lock = threading.Lock()
+        self._frame = None
+        self._running = False
+
+    def start(self):
+        self._running = True
+        t = threading.Thread(target=self._capture_loop, daemon=True)
+        t.start()
+        return self
+
+    def _capture_loop(self):
+        while self._running:
+            ok, frame = self._cap.read()
+            if ok:
+                with self._lock:
+                    self._frame = frame  # always overwrite — LIFO maxsize=1
+
+    def get(self):
+        with self._lock:
+            return self._frame.copy() if self._frame is not None else None
+
+    def stop(self):
+        self._running = False
+        self._cap.release()
+
+# =============================================
+#  SHARED STATE (thread-safe)
+# =============================================
+frame_buffer = FrameBuffer(0)
+
+# Thread-safe result containers
+identity_lock = threading.Lock()
+identity_results = []          # list of dicts: {name, confidence, box, color}
+
+weapon_lock = threading.Lock()
+weapon_results = []            # list of dicts: {class, confidence, box}
+
+# Centralized alert bus — threads push alerts, main thread emits via SocketIO
+alert_bus = queue.Queue()
+
+# Face data lock (protects known_face_names/embeddings during reload)
+face_data_lock = threading.Lock()
+
+# Cooldowns
 last_face_alert_time = 0
 last_weapon_alert_time = 0
 last_camera_blocked_alert_time = 0
+FACE_ALERT_COOLDOWN = 5
+WEAPON_ALERT_COOLDOWN = 5
+CAMERA_BLOCKED_COOLDOWN = 15
 
-FACE_ALERT_COOLDOWN = 5       # seconds between face alerts
-WEAPON_ALERT_COOLDOWN = 5     # seconds between weapon alerts
-CAMERA_BLOCKED_COOLDOWN = 15  # seconds between camera-blocked alerts
+# Tampering
+camera_dark_start = None
+CAMERA_DARK_THRESHOLD = 35
+CAMERA_BLOCKED_DURATION = 5
 
-# Camera blocked tracking
-camera_dark_start = None       # timestamp when frame first went dark
-CAMERA_DARK_THRESHOLD = 35     # raised from 15 to 35: most webcams output 20-40 noise when covered
-CAMERA_BLOCKED_DURATION = 5    # reduced from 10 to 5 seconds of continuous darkness before alert
+# =============================================
+#  TEMPORAL CONFIDENCE ACCUMULATOR
+# =============================================
 
-# YOLO inference throttle (run every N frames to save CPU)
-YOLO_FRAME_INTERVAL = 3
-frame_counter = 0
-last_yolo_results = []  # cache YOLO results between intervals
+class TemporalAccumulator:
+    """Tracks detection confidence over k consecutive frames.
+    Only triggers when avg confidence > threshold across the window."""
+
+    def __init__(self, k=3, threshold=0.6):
+        self.k = k
+        self.threshold = threshold
+        self._window = deque(maxlen=k)
+
+    def update(self, detections):
+        """Push frame detections. Returns filtered detections that pass temporal gate."""
+        if detections:
+            max_conf = max(d['confidence'] for d in detections)
+            self._window.append(max_conf)
+        else:
+            self._window.append(0.0)
+
+        if len(self._window) == self.k and (sum(self._window) / self.k) >= self.threshold:
+            return detections  # temporally confirmed
+        return []
+
+    def reset(self):
+        self._window.clear()
+
+# =============================================
+#  THREAD A — IDENTITY PIPELINE
+# =============================================
+
+class IdentityThread(threading.Thread):
+    """Reads from FrameBuffer, runs SSD face detection + OpenFace embedding,
+    compares against known employees via L2 Euclidean distance."""
+
+    def __init__(self, fbuf, face_net, embedder_net):
+        super().__init__(daemon=True)
+        self._fbuf = fbuf
+        self._face_net = face_net
+        self._embedder_net = embedder_net
+
+    def run(self):
+        global last_face_alert_time
+        while True:
+            frame = self._fbuf.get()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+
+            if self._face_net is None:
+                time.sleep(0.1)
+                continue
+
+            h, w = frame.shape[:2]
+            blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
+            self._face_net.setInput(blob)
+            detections = self._face_net.forward()
+
+            results = []
+            current_time = time.time()
+
+            for i in range(detections.shape[2]):
+                confidence = detections[0, 0, i, 2]
+                if confidence > 0.5:
+                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                    (startX, startY, endX, endY) = box.astype("int")
+                    startX, startY = max(0, startX), max(0, startY)
+                    endX, endY = min(w, endX), min(h, endY)
+
+                    name = "Unknown"
+                    color = (0, 0, 255)
+
+                    face_roi = frame[startY:endY, startX:endX]
+                    if face_roi.shape[0] > 0 and face_roi.shape[1] > 0 and self._embedder_net:
+                        face_blob = cv2.dnn.blobFromImage(
+                            face_roi, 1.0/255, (96, 96), (0,0,0), swapRB=True, crop=False)
+                        self._embedder_net.setInput(face_blob)
+                        vec = self._embedder_net.forward().flatten()
+
+                        min_dist = float("inf")
+                        best_match = None
+                        with face_data_lock:
+                            for j, known_vec in enumerate(known_face_embeddings):
+                                dist = np.linalg.norm(vec - known_vec)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    best_match = known_face_names[j]
+
+                        if min_dist < 1.0 and best_match is not None:
+                            name = best_match
+                            color = (0, 255, 0)
+
+                    results.append({
+                        'name': name, 'confidence': float(confidence),
+                        'box': (startX, startY, endX, endY), 'color': color
+                    })
+
+                    # Throttled alerts via bus
+                    if (current_time - last_face_alert_time) > FACE_ALERT_COOLDOWN:
+                        if name == "Unknown":
+                            alert_bus.put({'message': 'UNKNOWN FACE detected in camera feed!',
+                                           'type': 'danger', 'db_type': 'Security',
+                                           'db_msg': 'Unknown face detected'})
+                        else:
+                            alert_bus.put({'message': f'Attendance logged for {name}',
+                                           'type': 'success', 'db_type': None,
+                                           'db_msg': None, 'attendance': name})
+                        last_face_alert_time = current_time
+
+            with identity_lock:
+                identity_results.clear()
+                identity_results.extend(results)
+
+            time.sleep(0.01)
+
+# =============================================
+#  THREAD B — WEAPON DETECTION PIPELINE
+# =============================================
+
+class WeaponThread(threading.Thread):
+    """Reads from FrameBuffer, runs YOLOv5s weapon detection with
+    temporal confidence accumulation over k=3 consecutive frames."""
+
+    def __init__(self, fbuf, yolo_net):
+        super().__init__(daemon=True)
+        self._fbuf = fbuf
+        self._yolo = yolo_net
+        self._accumulator = TemporalAccumulator(k=3, threshold=0.6)
+
+    def run(self):
+        global last_weapon_alert_time
+        while True:
+            frame = self._fbuf.get()
+            if frame is None or self._yolo is None:
+                time.sleep(0.1)
+                continue
+
+            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self._yolo(img_rgb)
+
+            raw_dets = []
+            for det in results.xyxy[0]:
+                x1, y1, x2, y2, conf, cls = det
+                conf = float(conf)
+                if conf >= 0.15:
+                    class_name = self._yolo.names[int(cls)]
+                    raw_dets.append({
+                        'class': class_name.upper(),
+                        'confidence': conf,
+                        'box': (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+                    })
+
+            confirmed = self._accumulator.update(raw_dets)
+
+            with weapon_lock:
+                weapon_results.clear()
+                weapon_results.extend(confirmed)
+
+            # Throttled alert
+            current_time = time.time()
+            if confirmed and (current_time - last_weapon_alert_time) > WEAPON_ALERT_COOLDOWN:
+                names = list(set(d['class'] for d in confirmed))
+                wstr = ", ".join(names)
+                alert_bus.put({'message': f'WEAPON DETECTED: {wstr}! Immediate action required!',
+                               'type': 'danger', 'db_type': 'Weapon',
+                               'db_msg': f'Weapon detected: {wstr}'})
+                last_weapon_alert_time = current_time
+
+            time.sleep(0.01)
 
 # =============================================
 #  ROUTES
@@ -288,7 +512,7 @@ def api_add_employee():
     if not name or not emp_id or not photo:
         return jsonify({'error': 'Name, Employee ID, and photo are required.'}), 400
 
-    employees_dir = os.path.join('static', 'employees')
+    employees_dir = os.path.join(SCRIPT_DIR, 'static', 'employees')
     os.makedirs(employees_dir, exist_ok=True)
     safe_name = name.replace(' ', '_')
     filename = f"{emp_id}_{safe_name}.jpg"
@@ -371,196 +595,97 @@ def api_remove_employee():
     return jsonify({'success': True, 'name': emp_name})
 
 # =============================================
-#  VIDEO PROCESSING PIPELINE
+#  MAIN THREAD — GENERATE FRAMES (Tampering + Overlay + SocketIO)
 # =============================================
 def generate_frames():
-    global last_face_alert_time, last_weapon_alert_time, last_camera_blocked_alert_time
-    global camera_dark_start, frame_counter, last_yolo_results
-    
+    global last_camera_blocked_alert_time, camera_dark_start
+
     while True:
-        success, frame = camera.read()
-        if not success:
-            break
-            
+        frame = frame_buffer.get()
+        if frame is None:
+            time.sleep(0.01)
+            continue
+
         h, w = frame.shape[:2]
         current_time = time.time()
-        frame_counter += 1
-        
-        # -----------------------------------------------
-        #  FEATURE 1: Camera Blocked Detection
-        # -----------------------------------------------
+
+        # --- Drain alert bus and emit via SocketIO ---
+        while not alert_bus.empty():
+            try:
+                alert = alert_bus.get_nowait()
+                socketio.emit('alert', {
+                    'message': alert['message'],
+                    'type': alert['type']
+                }, namespace='/')
+                # Log to DB
+                if alert.get('db_type'):
+                    log_alert_to_db(alert['db_type'], alert['db_msg'])
+                if alert.get('attendance'):
+                    try:
+                        conn = sqlite3.connect(DB_NAME)
+                        c = conn.cursor()
+                        c.execute("INSERT INTO attendance (name) VALUES (?)",
+                                  (alert['attendance'],))
+                        conn.commit()
+                        conn.close()
+                    except Exception as e:
+                        print(f"[DB ERROR] {e}")
+            except queue.Empty:
+                break
+
+        # --- FEATURE 1: Camera Tampering Detection (main thread) ---
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         mean_brightness = np.mean(gray)
-        
+
         if mean_brightness < CAMERA_DARK_THRESHOLD:
-            # Frame is very dark
             if camera_dark_start is None:
-                camera_dark_start = current_time  # start tracking
-            
+                camera_dark_start = current_time
             dark_duration = current_time - camera_dark_start
-            
             if dark_duration >= CAMERA_BLOCKED_DURATION:
-                # Camera has been blocked for too long!
-                # Draw warning on frame
                 cv2.putText(frame, "!! CAMERA BLOCKED !!", (w // 2 - 200, h // 2),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-                cv2.putText(frame, f"Blocked for {dark_duration:.0f}s", (w // 2 - 120, h // 2 + 40),
+                cv2.putText(frame, f"Blocked for {dark_duration:.0f}s",
+                            (w // 2 - 120, h // 2 + 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
-                
-                # Send alert (throttled)
                 if (current_time - last_camera_blocked_alert_time) > CAMERA_BLOCKED_COOLDOWN:
                     socketio.emit('alert', {
-                        'message': f'CAMERA BLOCKED! Feed has been dark for {dark_duration:.0f} seconds. Possible tampering!',
+                        'message': f'CAMERA BLOCKED! Dark for {dark_duration:.0f}s. Possible tampering!',
                         'type': 'warning'
                     }, namespace='/')
                     log_alert_to_db("Tampering", f"Camera blocked for {dark_duration:.0f}s")
                     last_camera_blocked_alert_time = current_time
-                    print(f"[ALERT] Camera blocked for {dark_duration:.0f}s!")
         else:
-            # Frame is bright enough — reset dark tracker
             camera_dark_start = None
-            
-        # Debug brightness every N frames
-        if frame_counter % 30 == 0:
-            print(f"[CAM] Brightness: {mean_brightness:.1f}")
-        
-        # -----------------------------------------------
-        #  FEATURE 2: Face Detection & Recognition
-        # -----------------------------------------------
-        if face_net:
-            blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
-            face_net.setInput(blob)
-            detections = face_net.forward()
-            
-            for i in range(0, detections.shape[2]):
-                confidence = detections[0, 0, i, 2]
-                if confidence > 0.5:
-                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                    (startX, startY, endX, endY) = box.astype("int")
-                    
-                    name = "Unknown"
-                    color = (0, 0, 255)  # Red for unknown
-                    
-                    startX, startY = max(0, startX), max(0, startY)
-                    endX, endY = min(w, endX), min(h, endY)
-                    
-                    face_roi = frame[startY:endY, startX:endX]
-                    
-                    if face_roi.shape[0] > 0 and face_roi.shape[1] > 0 and embedder_net:
-                        face_blob = cv2.dnn.blobFromImage(face_roi, 1.0 / 255, (96, 96), (0, 0, 0), swapRB=True, crop=False)
-                        embedder_net.setInput(face_blob)
-                        vec = embedder_net.forward().flatten()
-                        
-                        min_dist = float("inf")
-                        best_match = None
-                        
-                        for j, known_vec in enumerate(known_face_embeddings):
-                            dist = np.linalg.norm(vec - known_vec)
-                            if dist < min_dist:
-                                min_dist = dist
-                                best_match = known_face_names[j]
-                                
-                        # Debug: print distance every 30 frames
-                        if frame_counter % 30 == 0 and best_match is not None:
-                            print(f"[FACE] Closest match: '{best_match}' dist={min_dist:.3f} (threshold=1.0)")
-                        
-                        if min_dist < 1.0 and best_match is not None:
-                            name = best_match
-                            color = (0, 255, 0)  # Green for known
-                    
-                    # Draw bounding box
-                    cv2.rectangle(frame, (startX, startY), (endX, endY), color, 2)
-                    label = f"{name} ({confidence*100:.0f}%)"
-                    cv2.putText(frame, label, (startX, startY - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                    
-                    # Throttled Alerts
-                    if (current_time - last_face_alert_time) > FACE_ALERT_COOLDOWN:
-                        if name == "Unknown":
-                            socketio.emit('alert', {
-                                'message': 'UNKNOWN FACE detected in camera feed!',
-                                'type': 'danger'
-                            }, namespace='/')
-                            log_alert_to_db("Security", "Unknown face detected")
-                        else:
-                            socketio.emit('alert', {
-                                'message': f'Attendance logged for {name}',
-                                'type': 'success'
-                            }, namespace='/')
-                            conn = sqlite3.connect(DB_NAME)
-                            c = conn.cursor()
-                            c.execute("INSERT INTO attendance (name) VALUES (?)", (name,))
-                            conn.commit()
-                            conn.close()
-                            
-                        last_face_alert_time = current_time
-        
-        # -----------------------------------------------
-        #  FEATURE 3: Weapon Detection (YOLOv5)
-        # -----------------------------------------------
-        weapon_found = False
-        
-        if yolo_net:
-            if frame_counter % YOLO_FRAME_INTERVAL == 0:
-                # Convert BGR to RGB for YOLOv5
-                img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                # Run inference
-                results = yolo_net(img_rgb)
-                
-                weapon_detections = []
-                # parse detections (xyxy format: x1, y1, x2, y2, confidence, class)
-                for det in results.xyxy[0]:
-                    x1, y1, x2, y2, conf, cls = det
-                    conf = float(conf)
-                    
-                    if conf >= WEAPON_CONFIDENCE:
-                        # YOLOv5 returns class names via names attribute
-                        class_name = yolo_net.names[int(cls)]
-                        weapon_detections.append({
-                            'class': class_name.upper(),
-                            'confidence': conf,
-                            'box': (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
-                        })
-                        print(f"[YOLOv5] {class_name.upper()} ({conf:.2f})", flush=True)
-                
-                last_yolo_results = weapon_detections
-        
-        # --- Draw weapon detections ---
-        if last_yolo_results:
-            weapon_found = True
-            # Red flashing border
+
+        # --- OVERLAY: Draw identity results from Thread A ---
+        with identity_lock:
+            faces_snapshot = list(identity_results)
+        for face in faces_snapshot:
+            sx, sy, ex, ey = face['box']
+            color = face['color']
+            cv2.rectangle(frame, (sx, sy), (ex, ey), color, 2)
+            label = f"{face['name']} ({face['confidence']*100:.0f}%)"
+            cv2.putText(frame, label, (sx, sy - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # --- OVERLAY: Draw weapon results from Thread B ---
+        with weapon_lock:
+            weapons_snapshot = list(weapon_results)
+        if weapons_snapshot:
             border_alpha = int(abs(np.sin(time.time() * 5)) * 255)
             cv2.rectangle(frame, (0, 0), (w-1, h-1), (0, 0, border_alpha), 4)
-            
-            for det in last_yolo_results:
+            for det in weapons_snapshot:
                 x, y, bw, bh = det['box']
                 conf = det['confidence']
                 cls = det['class']
-                
-                # Draw red warning box
                 cv2.rectangle(frame, (x, y), (x + bw, y + bh), (0, 0, 255), 3)
-                
-                # Warning label with background
                 weapon_label = f"WEAPON: {cls} ({conf*100:.0f}%)"
-                (label_w, label_h), _ = cv2.getTextSize(weapon_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-                cv2.rectangle(frame, (x, y - label_h - 10), (x + label_w + 5, y), (0, 0, 200), -1)
+                (lw, lh), _ = cv2.getTextSize(weapon_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                cv2.rectangle(frame, (x, y - lh - 10), (x + lw + 5, y), (0, 0, 200), -1)
                 cv2.putText(frame, weapon_label, (x + 2, y - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        # --- Trigger weapon alert (throttled) ---
-        if weapon_found and (current_time - last_weapon_alert_time) > WEAPON_ALERT_COOLDOWN:
-            weapon_names = list(set([d['class'] for d in last_yolo_results]))
-            weapon_str = ", ".join(weapon_names)
-            socketio.emit('alert', {
-                'message': f'WEAPON DETECTED: {weapon_str}! Immediate action required!',
-                'type': 'danger'
-            }, namespace='/')
-            log_alert_to_db("Weapon", f"Weapon detected: {weapon_str}")
-            last_weapon_alert_time = current_time
-            print(f"[ALERT] Weapon detected: {weapon_str}", flush=True)
 
-        # Encode frame for stream
+        # Encode and yield MJPEG
         ret, buffer = cv2.imencode('.jpg', frame)
         frame_bytes = buffer.tobytes()
         yield (b'--frame\r\n'
@@ -574,10 +699,28 @@ def video_feed():
 if __name__ == '__main__':
     print("=" * 50)
     print("  I.V.S.S. - Intelligent Video Surveillance")
+    print("  [ Advanced Multi-Threaded Architecture ]")
     print("=" * 50)
-    print(f"  Face Detection : {'ENABLED' if face_net else 'DISABLED'}")
+    print(f"  Face Detection  : {'ENABLED' if face_net else 'DISABLED'}")
     print(f"  Face Recognition: {'ENABLED' if embedder_net else 'DISABLED'}")
     print(f"  Weapon Detection: {'ENABLED' if yolo_net else 'DISABLED'}")
     print(f"  Camera Tamper   : ENABLED")
+    print(f"  Threading       : LIFO Buffer + Identity + Weapon")
     print("=" * 50)
-    socketio.run(app, debug=True, allow_unsafe_werkzeug=True)
+
+    # Start LIFO frame buffer (daemon capture thread)
+    print("[INIT] Starting frame capture daemon...")
+    frame_buffer.start()
+
+    # Start Thread A — Identity Pipeline
+    print("[INIT] Starting Identity thread (face detection + recognition)...")
+    id_thread = IdentityThread(frame_buffer, face_net, embedder_net)
+    id_thread.start()
+
+    # Start Thread B — Weapon Detection Pipeline
+    print("[INIT] Starting Weapon thread (YOLOv5s + temporal accumulation)...")
+    wp_thread = WeaponThread(frame_buffer, yolo_net)
+    wp_thread.start()
+
+    print("[INIT] All threads started. Launching Flask/SocketIO...")
+    socketio.run(app, debug=False, allow_unsafe_werkzeug=True)
