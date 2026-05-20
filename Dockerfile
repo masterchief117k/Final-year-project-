@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 
-# System deps for OpenCV
+# System deps for OpenCV (libgl1 replaces the removed libgl1-mesa-glx in Bookworm)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx libglib2.0-0 nginx && \
+    libgl1 libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -12,10 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Nginx config for SSL termination + reverse proxy
-COPY nginx.conf /etc/nginx/sites-available/default
+# Render sets PORT env var; default to 5000 for local dev
+ENV PORT=5000
+EXPOSE ${PORT}
 
-EXPOSE 80 443
-
-# Start nginx + gunicorn
-CMD nginx && gunicorn --worker-class eventlet -w 1 --bind 127.0.0.1:5000 "project.app:socketio" --timeout 120
+# Render handles SSL & reverse proxy — just run gunicorn directly
+CMD gunicorn --worker-class eventlet -w 1 --bind "0.0.0.0:${PORT}" "project.app:socketio" --timeout 120
