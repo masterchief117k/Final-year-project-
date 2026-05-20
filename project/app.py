@@ -482,6 +482,17 @@ def handle_disconnect():
 #  ROUTES
 # =============================================
 
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'ok',
+        'face_detection': face_net is not None,
+        'face_recognition': embedder_net is not None,
+        'weapon_detection': yolo_net is not None,
+        'known_faces': len(known_face_names),
+        'active_cameras': len(camera_sessions),
+    }), 200
+
 @app.route('/')
 def login():
     if 'user' in session:
