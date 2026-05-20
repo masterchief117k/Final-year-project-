@@ -216,3 +216,9 @@ project/test_images/*
 test/
 database.db
 *.pt
+
+# Diagnostic / debug output
+diagnostic_output.txt
+
+# Employee images (PII) at any level
+static/employees/
