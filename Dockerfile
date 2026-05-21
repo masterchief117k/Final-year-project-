@@ -7,14 +7,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Install Python deps first (layer caching — only re-runs if requirements change)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy application code
 COPY . .
 
-# Render sets PORT env var; default to 5000 for local dev
-ENV PORT=5000
+# Cloud Run injects PORT env var; default to 8080 (GCP convention)
+ENV PORT=8080
 EXPOSE ${PORT}
 
-# Render handles SSL & reverse proxy — just run gunicorn directly
-CMD gunicorn --worker-class eventlet -w 1 --bind "0.0.0.0:${PORT}" "project.app:socketio" --timeout 120
+# Single gunicorn worker with eventlet for WebSocket support
+CMD exec gunicorn --worker-class eventlet -w 1 --bind "0.0.0.0:${PORT}" "project.app:socketio" --timeout 300
