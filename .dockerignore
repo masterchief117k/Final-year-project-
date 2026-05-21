@@ -17,14 +17,14 @@ env/
 # Test files
 test/
 
-# Databases (ephemeral on Cloud Run anyway)
+# Databases (persisted on Render Disk, not in image)
 database.db
 *.db
 
-# Large model files (downloaded at runtime or baked in separately)
+# Large model files
 *.pt
 
-# Employee images (PII)
+# Employee images (PII — persisted on Render Disk)
 static/employees/
 
 # IDE / OS
@@ -34,10 +34,10 @@ static/employees/
 Thumbs.db
 .DS_Store
 
-# Deployment files not needed inside container
-deploy.sh
+# Files not needed inside container
 nginx.conf
 README.md
 LICENSE
 performance_graph.png
 "Ideation and mvp"
+render.yaml

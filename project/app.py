@@ -47,9 +47,14 @@ if not _raw_img_key:
     print('[SECURITY] WARNING: No IMAGE_ENCRYPTION_KEY in .env — generated ephemeral key. Images from previous runs cannot be decrypted!')
 fernet = Fernet(_raw_img_key.encode() if isinstance(_raw_img_key, str) else _raw_img_key)
 
-# --- Database Setup ---
+# --- Persistent Storage ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_NAME = os.path.join(SCRIPT_DIR, "database.db")
+# DATA_DIR: Render Disk mount (/data) in production, project dir locally
+DATA_DIR = os.environ.get('DATA_DIR', SCRIPT_DIR)
+os.makedirs(os.path.join(DATA_DIR, 'employees'), exist_ok=True)
+
+# --- Database Setup ---
+DB_NAME = os.path.join(DATA_DIR, "database.db")
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -116,7 +121,7 @@ def load_known_faces():
     global known_face_names, known_face_embeddings
     known_face_names.clear()
     known_face_embeddings.clear()
-    employees_dir = os.path.join(SCRIPT_DIR, "static", "employees")
+    employees_dir = os.path.join(DATA_DIR, "employees")
     if not os.path.exists(employees_dir):
         os.makedirs(employees_dir)
         return
@@ -577,7 +582,7 @@ def api_add_employee():
     photo = request.files.get('photo')
     if not name or not emp_id or not photo:
         return jsonify({'error': 'Name, Employee ID, and photo are required.'}), 400
-    employees_dir = os.path.join(SCRIPT_DIR, 'static', 'employees')
+    employees_dir = os.path.join(DATA_DIR, 'employees')
     os.makedirs(employees_dir, exist_ok=True)
     safe_name = name.replace(' ', '_')
     # Store as encrypted .enc file (not readable as image)

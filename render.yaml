@@ -1,0 +1,32 @@
+# render.yaml — Render Blueprint for I.V.S.S.
+# Docs: https://docs.render.com/blueprint-spec
+
+services:
+  - type: web
+    name: ivss
+    runtime: docker
+    repo: https://github.com/masterchief117k/Final-year-project-.git
+    branch: main
+    plan: standard          # 2 GB RAM — needed for PyTorch + OpenCV
+    region: singapore       # Closest to India
+    healthCheckPath: /health
+    numInstances: 1
+    autoDeploy: true        # Auto-deploy on push to main
+
+    # Persistent Disk — survives deploys and restarts
+    disk:
+      name: ivss-data
+      mountPath: /data
+      sizeGB: 1             # 1 GB for SQLite + employee images
+
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: FLASK_ENV
+        value: production
+      - key: SECRET_KEY
+        sync: false          # Set manually in Render dashboard
+      - key: IMAGE_ENCRYPTION_KEY
+        sync: false          # Set manually in Render dashboard
+      - key: ADMIN_PASSWORD
+        sync: false          # Set manually in Render dashboard
