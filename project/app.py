@@ -1,6 +1,9 @@
 import eventlet
 eventlet.monkey_patch()
 
+import sys
+print(f"[BOOT] Python {sys.version}", flush=True)
+
 import os
 import cv2
 import time
@@ -103,14 +106,26 @@ else:
 yolo_net = None
 WEAPON_CLASSES = {"knife"}
 WEAPON_CONFIDENCE = 0.15
-try:
-    print("[INFO] Loading YOLOv5s...")
-    yolo_net = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
-    yolo_net.conf = WEAPON_CONFIDENCE
-    yolo_net.classes = [43]
-    print(f"[INFO] YOLOv5 loaded.")
-except Exception as e:
-    print(f"[WARNING] YOLOv5 failed: {e}")
+_yolo_load_attempted = False
+
+def _lazy_load_yolo():
+    """Load YOLOv5 on first use, not at import time.
+    This prevents Render health-check timeouts during startup."""
+    global yolo_net, _yolo_load_attempted
+    if _yolo_load_attempted:
+        return
+    _yolo_load_attempted = True
+    try:
+        print("[INFO] Loading YOLOv5s (lazy)...", flush=True)
+        yolo_net = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+        yolo_net.conf = WEAPON_CONFIDENCE
+        yolo_net.classes = [43]
+        print(f"[INFO] YOLOv5 loaded successfully.", flush=True)
+    except Exception as e:
+        print(f"[WARNING] YOLOv5 failed to load: {e}", flush=True)
+        yolo_net = None
+
+print("[BOOT] Core models loaded. YOLOv5 will load on first camera connection.", flush=True)
 
 # --- Known Faces ---
 known_face_names = []
@@ -363,6 +378,7 @@ class CameraSession:
 
     def _weapon_loop(self):
         print(f"[THREAD-B {self.camera_id[:12]}] Weapon loop started")
+        _lazy_load_yolo()  # Download YOLOv5 on first camera connection
         accumulator = TemporalAccumulator(k=3, threshold=0.6)
         while self._running:
             try:

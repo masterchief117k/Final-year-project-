@@ -25,4 +25,4 @@ EXPOSE ${PORT}
 # Gunicorn with eventlet worker for WebSocket support
 # - 1 worker: memory-conscious for AI models
 # - 300s timeout: keeps WebSocket connections alive
-CMD exec gunicorn --worker-class eventlet -w 1 --bind "0.0.0.0:${PORT}" "project.app:socketio" --timeout 300
+CMD exec gunicorn --worker-class eventlet -w 1 --bind "0.0.0.0:${PORT}" "project.app:app" --timeout 300
